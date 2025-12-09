@@ -105,6 +105,8 @@ Para validar o funcionamento do script, recomenda-se rodar o Wireshark em parale
 1.  Filtre pelo IP do alvo: `ip.addr == SEU_ALVO`.
 2.  **Observação no SYN Scan:** Você verá o envio do **SYN**, o recebimento do **SYN, ACK** do alvo e o envio do **RST** pela sua máquina, comprovando o fechamento forçado da conexão.
 3.  **Observação no UDP Scan:** Você verá o envio do UDP e o retorno de um erro **ICMP** indicando "Port Unreachable" para portas fechadas.
+   <img width="370" height="123" alt="image" src="https://github.com/user-attachments/assets/47a031bb-2833-4859-aaf3-f6f12f529f67" />
+
    <img width="1014" height="185" alt="image" src="https://github.com/user-attachments/assets/4c8f3bf8-9e5c-4dbc-891f-25b049dde8df" />
 
 
