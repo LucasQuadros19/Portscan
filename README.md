@@ -56,6 +56,8 @@ Este é o método padrão de scan, pois é rápido e menos ruidoso nos logs do s
       * Se receber **SYN+ACK** → A porta está **ABERTA**. O script envia imediatamente um **RST** para derrubar a conexão antes que ela seja estabelecida (evitando log de aplicação).
       * Se receber **RST** → A porta está **FECHADA**.
       * Sem resposta (Timeout) → A porta está **FILTRADA** (provavelmente um firewall descartou o pacote).
+        <img width="610" height="385" alt="image" src="https://github.com/user-attachments/assets/120fea55-9214-4d7b-9e1a-de9ceb342d89" />
+
 
 ### 2\. UDP Scan
 
@@ -65,6 +67,10 @@ Diferente do TCP, o UDP não possui confirmação de entrega (Stateless).
   * **Lógica:**
       * Se receber **ICMP Destination Unreachable (Port Unreachable)** → A porta está **FECHADA**. O sistema operacional do alvo avisa que não há serviço ouvindo ali.
       * Sem resposta → A porta é considerada **ABERTA ou FILTRADA**. (Não há como distinguir com certeza sem envio de payload específico, pois o firewall pode ter bloqueado ou o serviço aceitou o pacote silenciosamente).
+   
+        
+        <img width="606" height="381" alt="image" src="https://github.com/user-attachments/assets/1c410598-f9d2-45c3-98d0-2859d91e719b" />
+
 
 ### 3\. TCP ACK Scan
 
@@ -74,6 +80,8 @@ Este scan **não detecta portas abertas**. Ele serve para identificar a presenç
   * **Lógica:**
       * Se receber **RST** → O pacote passou pelo firewall e chegou ao alvo (Estado: **Não Filtrado**).
       * Sem resposta ou ICMP Unreachable → O firewall bloqueou o pacote (Estado: **Filtrado**).
+        <img width="607" height="384" alt="image" src="https://github.com/user-attachments/assets/f4e51ac9-cbd0-40be-acf8-f3b0c15d379a" />
+
 
 ### 4\. TCP Xmas Scan
 
@@ -84,6 +92,9 @@ Utiliza uma combinação de flags incomum (FIN, PSH, URG) para testar a conformi
       * Se receber **RST** → A porta está **FECHADA**.
       * Sem resposta → A porta está **ABERTA ou FILTRADA**.
       * *Nota:* Este scan falha contra sistemas Windows, pois a Microsoft implementa a pilha TCP de forma a responder RST para qualquer pacote malformado, independentemente do estado da porta.
+       <img width="607" height="388" alt="image" src="https://github.com/user-attachments/assets/6e930620-0b43-409f-a0d6-32cb553fcff3" />
+
+
 
 -----
 
