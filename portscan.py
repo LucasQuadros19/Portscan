@@ -34,7 +34,7 @@ def tcp_syn_scan(target_ip, port):
     elif resp.haslayer(TCP):
         # 0x12 é hexadecimal para SYN+ACK (SYN=0x02, ACK=0x10)
         if resp.getlayer(TCP).flags == 0x12:
-            # Envia RST para fechar a conexão graciosamente (Stealth)
+            # Envia RST para fechar
             sr(IP(dst=target_ip)/TCP(dport=port, flags="R"), timeout=1, verbose=0)
             return "ABERTA"
         elif resp.getlayer(TCP).flags == 0x14: # 0x14 é RST+ACK
