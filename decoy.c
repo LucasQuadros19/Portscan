@@ -12,14 +12,14 @@
 #include <netdb.h>
 #include <signal.h>
 
-// --- LISTA DAS TOP 20 PORTAS MAIS COMUNS ---
-int top_ports[] = {21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 993, 995, 1723, 3306, 3389, 5900, 8080};
-int num_top_ports = 20;
+// --- LISTA DAS TOP 20 PORTAS ---
+int top_ports[] = {21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 445, 993, 995, 1723, 3306, 3389, 5900, 8080};
+int num_top_ports = 19;
 
-// Variáveis globais
-volatile int stop_sniffer = 0;
-int global_socket = -1;
+// Variáveis Globais
+volatile int stop_program = 0; // Usado APENAS para Ctrl+C ou fim total
 char target_ip_global[32]; 
+int global_socket = -1;
 
 struct pseudo_header {
     u_int32_t source_address;
@@ -43,9 +43,11 @@ unsigned short csum(unsigned short *ptr, int nbytes) {
     return(answer);
 }
 
+// Tratamento de Ctrl+C
 void handle_signal(int sig) {
     if (sig == SIGINT) {
-        printf("\n[!] Encerrando scanner...\n");
+        printf("\n\n[!] Interrupção detectada (Ctrl+C). Encerrando...\n");
+        stop_program = 1;
         if (global_socket > 0) close(global_socket);
         exit(0);
     }
@@ -55,6 +57,7 @@ void gerar_ip_randomico(char *buffer) {
     sprintf(buffer, "%d.%d.%d.%d", (rand()%220)+1, rand()%255, rand()%255, (rand()%254)+1);
 }
 
+// Resolve DNS
 int hostname_to_ip(char *hostname, char *output_ip) {
     struct hostent *he;
     struct sockaddr_in sa;
@@ -62,11 +65,13 @@ int hostname_to_ip(char *hostname, char *output_ip) {
         strcpy(output_ip, hostname);
         return 1;
     }
+    printf("[*] Resolvendo DNS para '%s'...\n", hostname);
     if ((he = gethostbyname(hostname)) == NULL) return 0;
     strcpy(output_ip, inet_ntoa(*(struct in_addr*)he->h_addr_list[0]));
     return 1;
 }
 
+// IP Local Automático
 int obter_ip_local_automatico(char *buffer_ip) {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) return -1;
@@ -84,7 +89,7 @@ int obter_ip_local_automatico(char *buffer_ip) {
     return 0;
 }
 
-// --- THREAD SNIFFER (Ouvido) ---
+// --- SNIFFER THREAD (Ouvido) ---
 void *sniffer_thread(void *arg) {
     int sock_raw;
     struct sockaddr saddr;
@@ -92,9 +97,14 @@ void *sniffer_thread(void *arg) {
     unsigned char *buffer = (unsigned char *)malloc(65536);
 
     sock_raw = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
-    if(sock_raw < 0) return NULL;
+    if(sock_raw < 0) {
+        perror("Erro Sniffer Socket");
+        return NULL;
+    }
 
-    while(!stop_sniffer) {
+    // O loop continua até o programa inteiro acabar. 
+    // NÃO PARA quando acha uma porta, para poder achar as próximas.
+    while(!stop_program) {
         int data_size = recvfrom(sock_raw, buffer, 65536, 0, &saddr, (socklen_t*)&saddr_size);
         if(data_size < 0) continue;
 
@@ -105,14 +115,12 @@ void *sniffer_thread(void *arg) {
         struct sockaddr_in source;
         source.sin_addr.s_addr = iph->saddr;
 
-        // Filtra respostas do ALVO
+        // Filtra: Veio do Alvo?
         if (strcmp(inet_ntoa(source.sin_addr), target_ip_global) == 0) {
-            // Se for SYN+ACK (Porta Aberta)
+            // É SYN-ACK? (Porta Aberta)
             if (tcph->syn == 1 && tcph->ack == 1) {
-                printf("\n\033[1;32m[!!!] PORTA ABERTA DETECTADA: %d \033[0m\n", ntohs(tcph->source));
+                printf("\n\033[1;32m[!!!] SUCESSO! Porta %d ABERTA! \033[0m\n", ntohs(tcph->source));
             }
-            // Se for RST+ACK (Porta Fechada - opcional mostrar)
-            // else if (tcph->rst == 1) { printf("Porta %d fechada.\n", ntohs(tcph->source)); }
         }
     }
     close(sock_raw);
@@ -120,8 +128,8 @@ void *sniffer_thread(void *arg) {
     return NULL;
 }
 
-// --- FUNÇÃO DE ENVIO PARA UMA PORTA ESPECÍFICA ---
-void scan_port(int target_port, int num_decoys, char *my_ip, int sock) {
+// --- FUNÇÃO DE ENVIO DECOY PARA UMA PORTA ---
+void scan_port_decoy(int target_port, int num_decoys, char *my_ip, int sock) {
     char datagram[4096];
     struct iphdr *iph = (struct iphdr *) datagram;
     struct tcphdr *tcph = (struct tcphdr *) (datagram + sizeof(struct ip));
@@ -135,13 +143,12 @@ void scan_port(int target_port, int num_decoys, char *my_ip, int sock) {
     int total_packets = num_decoys + 1;
     int real_packet_index = rand() % total_packets;
 
-    printf("Verificando porta %d... ", target_port);
-    fflush(stdout); // Força print sem nova linha
+    fflush(stdout); 
 
     for (int i = 0; i < total_packets; i++) {
-        char current_source_ip[32];
+        if (stop_program) return; // Sai se Ctrl+C
 
-        // Define se é isca ou real
+        char current_source_ip[32];
         if (i == real_packet_index) {
             strcpy(current_source_ip, my_ip);
         } else {
@@ -168,7 +175,7 @@ void scan_port(int target_port, int num_decoys, char *my_ip, int sock) {
         tcph->urg = 0; tcph->window = htons(5840); 
         tcph->check = 0; tcph->urg_ptr = 0;
 
-        // Pseudo Header p/ Checksum
+        // Checksum
         psh.source_address = inet_addr(current_source_ip);
         psh.dest_address = inet_addr(target_ip_global);
         psh.placeholder = 0; psh.protocol = IPPROTO_TCP;
@@ -182,15 +189,15 @@ void scan_port(int target_port, int num_decoys, char *my_ip, int sock) {
         free(pseudogram);
 
         if (sendto(sock, datagram, iph->tot_len, 0, (struct sockaddr *) &dest, sizeof(dest)) < 0) {
-            // Silencioso para não poluir
+            // Silencioso
         }
-        
-        // Pequeno delay para não engasgar a rede (muito rápido pode perder pacotes)
-        usleep(2000); 
+        usleep(1500); // Pequeno delay entre iscas
     }
-    printf(" Enviado.\n");
+    printf("Enviado.\n");
+    // Removi o "stop_program = 1" daqui, para ele poder ir para a próxima porta!
 }
 
+// --- MAIN ---
 int main(void) {
     signal(SIGINT, handle_signal);
     srand(time(NULL));
@@ -201,75 +208,73 @@ int main(void) {
     int p_start, p_end;
     pthread_t sniffer_id;
 
-    printf("\n=== ULTIMATE C DECOY SCANNER ===\n");
+    printf("\n=== FINAL DECOY SCANNER (MULTI-PORT + DNS) ===\n");
     
-    // 1. Configurar Alvo
-    printf("Alvo (IP/Domain): ");
+    // 1. Alvo
+    printf("Alvo (IP ou Hostname): ");
     scanf("%99s", target_input);
     if (!hostname_to_ip(target_input, target_ip_global)) {
-        printf("Erro DNS.\n"); return 1;
+        printf("Erro Fatal DNS.\n"); return 1;
     }
-    printf("[*] Alvo: %s\n", target_ip_global);
+    printf("[*] Alvo Resolvido: %s\n", target_ip_global);
 
-    // 2. Configurar IP Local
+    // 2. IP Local
     if (obter_ip_local_automatico(my_real_ip) != 0) {
-        printf("Digite seu IP Real: "); scanf("%31s", my_real_ip);
+        printf("IP Local: "); scanf("%31s", my_real_ip);
     } else {
         printf("[*] IP Local: %s\n", my_real_ip);
     }
 
     // 3. Iscas
-    printf("Decoys por porta (ex: 5): ");
+    printf("Decoys por porta: ");
     scanf("%d", &num_decoys);
 
-    // 4. MENU DE OPÇÕES
+    // 4. MENU
     printf("\n--- MODO DE SCAN ---\n");
-    printf("1. Porta Unica (ex: 80)\n");
-    printf("2. Intervalo (ex: 80-200)\n");
-    printf("3. Portas Comuns (Top 20)\n");
+    printf("1. Porta Unica\n");
+    printf("2. Intervalo (Range)\n");
+    printf("3. Top 20 Portas\n");
     printf("Opcao: ");
     scanf("%d", &mode);
 
-    // Iniciar Thread
+    // Iniciar Sniffer
+    printf("\n[*] Iniciando Sniffer...\n");
     pthread_create(&sniffer_id, NULL, sniffer_thread, NULL);
 
-    // Preparar Socket Raw
+    // Raw Socket
     global_socket = socket(PF_INET, SOCK_RAW, IPPROTO_TCP);
+    if(global_socket < 0) { perror("Erro Socket (sudo?)"); return 1; }
     int one = 1;
-    const int *val = &one;
-    setsockopt(global_socket, IPPROTO_IP, IP_HDRINCL, val, sizeof(one));
+    setsockopt(global_socket, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one));
 
     // LÓGICA DO MENU
     switch(mode) {
-        case 1: // Única
-            printf("Digite a porta: ");
-            scanf("%d", &p_start);
-            scan_port(p_start, num_decoys, my_real_ip, global_socket);
+        case 1:
+            printf("Porta: "); scanf("%d", &p_start);
+            scan_port_decoy(p_start, num_decoys, my_real_ip, global_socket);
             break;
-            
-        case 2: // Intervalo
-            printf("Porta Inicial: "); scanf("%d", &p_start);
-            printf("Porta Final: "); scanf("%d", &p_end);
+        case 2:
+            printf("Inicio: "); scanf("%d", &p_start);
+            printf("Fim: "); scanf("%d", &p_end);
             for(int p = p_start; p <= p_end; p++) {
-                scan_port(p, num_decoys, my_real_ip, global_socket);
+                if(stop_program) break;
+                scan_port_decoy(p, num_decoys, my_real_ip, global_socket);
             }
             break;
-
-        case 3: // Top Ports
-            printf("[*] Scaneando as %d portas mais importantes...\n", num_top_ports);
+        case 3:
+            printf("[*] Scaneando Top 20 Portas...\n");
             for(int i = 0; i < num_top_ports; i++) {
-                scan_port(top_ports[i], num_decoys, my_real_ip, global_socket);
+                if(stop_program) break;
+                scan_port_decoy(top_ports[i], num_decoys, my_real_ip, global_socket);
             }
             break;
-            
         default:
             printf("Opcao invalida.\n");
-            break;
     }
 
-    printf("\n[+] Scan concluido. Aguardando ultimas respostas (3s)...\n");
+    printf("\n[+] Scan Finalizado. Aguardando ultimas respostas (3s)...\n");
     sleep(3);
-    stop_sniffer = 1;
+    stop_program = 1; // Agora sim paramos o sniffer
     close(global_socket);
     return 0;
 }
