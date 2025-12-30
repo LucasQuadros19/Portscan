@@ -1,275 +1,175 @@
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
-#include <sys/socket.h>
-#include <netinet/tcp.h>
-#include <netinet/ip.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <pthread.h>
-#include <time.h>
-#include <errno.h>
-#include <netdb.h>
-#include <signal.h>
+from scapy.all import *
+import socket
+import sys
+import time
+from urllib.parse import urlparse # Import necessário para interpretar URLs
 
-// --- LISTA DAS TOP 20 PORTAS MAIS COMUNS ---
-int top_ports[] = {21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 993, 995, 1723, 3306, 3389, 5900, 8080};
-int num_top_ports = 20;
+# Configuração silenciosa do Scapy
+conf.verb = 0
 
-// Variáveis globais
-volatile int stop_sniffer = 0;
-int global_socket = -1;
-char target_ip_global[32]; 
+PORTAS_COMUNS = [21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 445, 3306, 3389, 8080]
 
-struct pseudo_header {
-    u_int32_t source_address;
-    u_int32_t dest_address;
-    u_int8_t placeholder;
-    u_int8_t protocol;
-    u_int16_t tcp_length;
-};
+def limpar_alvo(alvo_input):
+    """
+    Interpreta o input do usuário e extrai apenas o hostname limpo.
+    Aceita: 
+    - https://www.site.com/paginas -> www.site.com
+    - http://192.168.1.50:8080 -> 192.168.1.50
+    - site.com -> site.com
+    """
+    alvo = alvo_input.strip()
 
-// Checksum
-unsigned short csum(unsigned short *ptr, int nbytes) {
-    register long sum;
-    unsigned short oddbyte;
-    register short answer;
-    sum = 0;
-    while(nbytes > 1) { sum += *ptr++; nbytes -= 2; }
-    if(nbytes == 1) { oddbyte = 0; *((unsigned char*)&oddbyte) = *(unsigned char*)ptr; sum += oddbyte; }
-    sum = (sum >> 16) + (sum & 0xffff);
-    sum = sum + (sum >> 16);
-    answer = (short)~sum;
-    return(answer);
-}
-
-void handle_signal(int sig) {
-    if (sig == SIGINT) {
-        printf("\n[!] Encerrando scanner...\n");
-        if (global_socket > 0) close(global_socket);
-        exit(0);
-    }
-}
-
-void gerar_ip_randomico(char *buffer) {
-    sprintf(buffer, "%d.%d.%d.%d", (rand()%220)+1, rand()%255, rand()%255, (rand()%254)+1);
-}
-
-int hostname_to_ip(char *hostname, char *output_ip) {
-    struct hostent *he;
-    struct sockaddr_in sa;
-    if (inet_pton(AF_INET, hostname, &(sa.sin_addr)) != 0) {
-        strcpy(output_ip, hostname);
-        return 1;
-    }
-    if ((he = gethostbyname(hostname)) == NULL) return 0;
-    strcpy(output_ip, inet_ntoa(*(struct in_addr*)he->h_addr_list[0]));
-    return 1;
-}
-
-int obter_ip_local_automatico(char *buffer_ip) {
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0) return -1;
-    struct sockaddr_in serv;
-    memset(&serv, 0, sizeof(serv));
-    serv.sin_family = AF_INET;
-    serv.sin_addr.s_addr = inet_addr("8.8.8.8");
-    serv.sin_port = htons(53);
-    if (connect(sock, (const struct sockaddr*) &serv, sizeof(serv)) < 0) { close(sock); return -1; }
-    struct sockaddr_in nome_local;
-    socklen_t namelen = sizeof(nome_local);
-    if (getsockname(sock, (struct sockaddr*) &nome_local, &namelen) < 0) { close(sock); return -1; }
-    inet_ntop(AF_INET, &nome_local.sin_addr, buffer_ip, 32);
-    close(sock);
-    return 0;
-}
-
-// --- THREAD SNIFFER (Ouvido) ---
-void *sniffer_thread(void *arg) {
-    int sock_raw;
-    struct sockaddr saddr;
-    int saddr_size = sizeof(saddr);
-    unsigned char *buffer = (unsigned char *)malloc(65536);
-
-    sock_raw = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
-    if(sock_raw < 0) return NULL;
-
-    while(!stop_sniffer) {
-        int data_size = recvfrom(sock_raw, buffer, 65536, 0, &saddr, (socklen_t*)&saddr_size);
-        if(data_size < 0) continue;
-
-        struct iphdr *iph = (struct iphdr*)buffer;
-        unsigned short iphdrlen = iph->ihl * 4;
-        struct tcphdr *tcph = (struct tcphdr*)(buffer + iphdrlen);
-
-        struct sockaddr_in source;
-        source.sin_addr.s_addr = iph->saddr;
-
-        // Filtra respostas do ALVO
-        if (strcmp(inet_ntoa(source.sin_addr), target_ip_global) == 0) {
-            // Se for SYN+ACK (Porta Aberta)
-            if (tcph->syn == 1 && tcph->ack == 1) {
-                printf("\n\033[1;32m[!!!] PORTA ABERTA DETECTADA: %d \033[0m\n", ntohs(tcph->source));
-            }
-            // Se for RST+ACK (Porta Fechada - opcional mostrar)
-            // else if (tcph->rst == 1) { printf("Porta %d fechada.\n", ntohs(tcph->source)); }
-        }
-    }
-    close(sock_raw);
-    free(buffer);
-    return NULL;
-}
-
-// --- FUNÇÃO DE ENVIO PARA UMA PORTA ESPECÍFICA ---
-void scan_port(int target_port, int num_decoys, char *my_ip, int sock) {
-    char datagram[4096];
-    struct iphdr *iph = (struct iphdr *) datagram;
-    struct tcphdr *tcph = (struct tcphdr *) (datagram + sizeof(struct ip));
-    struct pseudo_header psh;
-    struct sockaddr_in dest;
-
-    dest.sin_family = AF_INET;
-    dest.sin_port = htons(target_port);
-    dest.sin_addr.s_addr = inet_addr(target_ip_global);
-
-    int total_packets = num_decoys + 1;
-    int real_packet_index = rand() % total_packets;
-
-    printf("Verificando porta %d... ", target_port);
-    fflush(stdout); // Força print sem nova linha
-
-    for (int i = 0; i < total_packets; i++) {
-        char current_source_ip[32];
-
-        // Define se é isca ou real
-        if (i == real_packet_index) {
-            strcpy(current_source_ip, my_ip);
-        } else {
-            gerar_ip_randomico(current_source_ip);
-        }
-
-        memset(datagram, 0, 4096);
-
-        // IP Header
-        iph->ihl = 5; iph->version = 4; iph->tos = 0;
-        iph->tot_len = sizeof(struct ip) + sizeof(struct tcphdr);
-        iph->id = htonl(54321 + i); iph->frag_off = 0; iph->ttl = 255;
-        iph->protocol = IPPROTO_TCP; iph->check = 0;
-        iph->saddr = inet_addr(current_source_ip);
-        iph->daddr = inet_addr(target_ip_global);
-        iph->check = csum((unsigned short *) datagram, iph->ihl << 2);
-
-        // TCP Header
-        tcph->source = htons(40000 + (rand() % 10000));
-        tcph->dest = htons(target_port);
-        tcph->seq = 0; tcph->ack_seq = 0;
-        tcph->doff = 5; tcph->fin = 0; tcph->syn = 1; 
-        tcph->rst = 0; tcph->psh = 0; tcph->ack = 0; 
-        tcph->urg = 0; tcph->window = htons(5840); 
-        tcph->check = 0; tcph->urg_ptr = 0;
-
-        // Pseudo Header p/ Checksum
-        psh.source_address = inet_addr(current_source_ip);
-        psh.dest_address = inet_addr(target_ip_global);
-        psh.placeholder = 0; psh.protocol = IPPROTO_TCP;
-        psh.tcp_length = htons(sizeof(struct tcphdr));
-
-        int psize = sizeof(struct pseudo_header) + sizeof(struct tcphdr);
-        char *pseudogram = malloc(psize);
-        memcpy(pseudogram , (char*) &psh , sizeof(struct pseudo_header));
-        memcpy(pseudogram + sizeof(struct pseudo_header) , tcph , sizeof(struct tcphdr));
-        tcph->check = csum((unsigned short*) pseudogram , psize);
-        free(pseudogram);
-
-        if (sendto(sock, datagram, iph->tot_len, 0, (struct sockaddr *) &dest, sizeof(dest)) < 0) {
-            // Silencioso para não poluir
-        }
+    if not alvo.startswith(("http://", "https://")):
+        alvo = "http://" + alvo
         
-        // Pequeno delay para não engasgar a rede (muito rápido pode perder pacotes)
-        usleep(2000); 
-    }
-    printf(" Enviado.\n");
-}
-
-int main(void) {
-    signal(SIGINT, handle_signal);
-    srand(time(NULL));
-
-    char my_real_ip[32];
-    char target_input[100];
-    int num_decoys, mode;
-    int p_start, p_end;
-    pthread_t sniffer_id;
-
-    printf("\n=== ULTIMATE C DECOY SCANNER ===\n");
+    parsed = urlparse(alvo)
+    hostname = parsed.netloc # Pega apenas o domínio/IP (ex: www.google.com:80)
     
-    // 1. Configurar Alvo
-    printf("Alvo (IP/Domain): ");
-    scanf("%99s", target_input);
-    if (!hostname_to_ip(target_input, target_ip_global)) {
-        printf("Erro DNS.\n"); return 1;
-    }
-    printf("[*] Alvo: %s\n", target_ip_global);
+    # Se houver porta explícita (ex: :8080), removemos para resolver o IP base
+    if ':' in hostname:
+        hostname = hostname.split(':')[0]
+        
+    return hostname
 
-    // 2. Configurar IP Local
-    if (obter_ip_local_automatico(my_real_ip) != 0) {
-        printf("Digite seu IP Real: "); scanf("%31s", my_real_ip);
-    } else {
-        printf("[*] IP Local: %s\n", my_real_ip);
-    }
+def resolver_alvo(alvo_input):
+    """
+    Limpa o hostname e resolve o IP.
+    """
+    host_limpo = limpar_alvo(alvo_input)
+    
+    try:
+        ip = socket.gethostbyname(host_limpo)
+        # Mostra o feedback visual da interpretação
+        if host_limpo != alvo_input:
+            print(f"[*] Input interpretado: '{alvo_input}' -> '{host_limpo}'")
+        print(f"[*] Alvo resolvido para IP: {ip}")
+        return ip
+    except socket.gaierror:
+        print(f"\n[!] Erro DNS: Não foi possível resolver o host '{host_limpo}'.")
+        print("    Verifique a conexão ou se o endereço está correto.")
+        sys.exit(1)
 
-    // 3. Iscas
-    printf("Decoys por porta (ex: 5): ");
-    scanf("%d", &num_decoys);
+def enviar_pacote(pkt, timeout=1):
+    """
+    Envia pacote com proteção contra travamento do Ctrl+C
+    """
+    inicio = time.time()
+    resp = sr1(pkt, timeout=timeout, verbose=0)
+    duracao = time.time() - inicio
 
-    // 4. MENU DE OPÇÕES
-    printf("\n--- MODO DE SCAN ---\n");
-    printf("1. Porta Unica (ex: 80)\n");
-    printf("2. Intervalo (ex: 80-200)\n");
-    printf("3. Portas Comuns (Top 20)\n");
-    printf("Opcao: ");
-    scanf("%d", &mode);
+    # Se retornou None muito rápido, foi interrupção do usuário
+    if resp is None and duracao < (timeout * 0.8):
+        raise KeyboardInterrupt
+    
+    return resp
 
-    // Iniciar Thread
-    pthread_create(&sniffer_id, NULL, sniffer_thread, NULL);
 
-    // Preparar Socket Raw
-    global_socket = socket(PF_INET, SOCK_RAW, IPPROTO_TCP);
-    int one = 1;
-    const int *val = &one;
-    setsockopt(global_socket, IPPROTO_IP, IP_HDRINCL, val, sizeof(one));
+def tcp_syn_scan(target_ip, port):
+    pkt = IP(dst=target_ip)/TCP(dport=port, flags="S")
+    resp = enviar_pacote(pkt)
+    
+    if resp is None: return "Filtrada (Sem resposta)"
+    elif resp.haslayer(TCP):
+        if resp.getlayer(TCP).flags == 0x12:
+            sr(IP(dst=target_ip)/TCP(dport=port, flags="R"), timeout=1, verbose=0)
+            return "ABERTA"
+        elif resp.getlayer(TCP).flags == 0x14: return "Fechada"
+    return "Desconhecido"
 
-    // LÓGICA DO MENU
-    switch(mode) {
-        case 1: // Única
-            printf("Digite a porta: ");
-            scanf("%d", &p_start);
-            scan_port(p_start, num_decoys, my_real_ip, global_socket);
-            break;
-            
-        case 2: // Intervalo
-            printf("Porta Inicial: "); scanf("%d", &p_start);
-            printf("Porta Final: "); scanf("%d", &p_end);
-            for(int p = p_start; p <= p_end; p++) {
-                scan_port(p, num_decoys, my_real_ip, global_socket);
-            }
-            break;
+def udp_scan(target_ip, port):
+    pkt = IP(dst=target_ip)/UDP(dport=port)
+    resp = enviar_pacote(pkt)
+    if resp is None: return "Aberta/Filtrada"
+    elif resp.haslayer(ICMP):
+        if int(resp.getlayer(ICMP).type) == 3 and int(resp.getlayer(ICMP).code) == 3:
+            return "Fechada"
+    return "Aberta/Filtrada"
 
-        case 3: // Top Ports
-            printf("[*] Scaneando as %d portas mais importantes...\n", num_top_ports);
-            for(int i = 0; i < num_top_ports; i++) {
-                scan_port(top_ports[i], num_decoys, my_real_ip, global_socket);
-            }
-            break;
-            
-        default:
-            printf("Opcao invalida.\n");
-            break;
-    }
+def tcp_ack_scan(target_ip, port):
+    pkt = IP(dst=target_ip)/TCP(dport=port, flags="A")
+    resp = enviar_pacote(pkt)
+    if resp is None: return "Filtrada (Firewall)"
+    elif resp.haslayer(TCP):
+        if resp.getlayer(TCP).flags == 0x04: return "Não Filtrada"
+    elif resp.haslayer(ICMP):
+         if int(resp.getlayer(ICMP).type) == 3: return "Filtrada (ICMP)"
+    return "Filtrada"
 
-    printf("\n[+] Scan concluido. Aguardando ultimas respostas (3s)...\n");
-    sleep(3);
-    stop_sniffer = 1;
-    close(global_socket);
-    return 0;
-}
+def tcp_xmas_scan(target_ip, port):
+    pkt = IP(dst=target_ip)/TCP(dport=port, flags="FPU")
+    resp = enviar_pacote(pkt)
+    if resp is None: return "Aberta/Filtrada"
+    elif resp.haslayer(TCP):
+        if resp.getlayer(TCP).flags == 0x14: return "Fechada"
+    elif resp.haslayer(ICMP): return "Filtrada"
+    return "Aberta/Filtrada"
+
+# --- MENUS ---
+
+def obter_portas():
+    print("\n--- Seleção de Portas ---")
+    print("1. Lista (ex: 80,443)")
+    print("2. Intervalo (ex: 1-100)")
+    print("3. Portas comuns (Top Ports)")
+    
+    opcao = input("\nOpção: ").strip()
+    
+    if opcao == '1':
+        entrada = input("Portas: ")
+        return [int(p.strip()) for p in entrada.split(',')]
+    elif opcao == '2':
+        entrada = input("Intervalo (inicio-fim): ")
+        i, f = map(int, entrada.split('-'))
+        if i > f: raise ValueError("Início maior que o fim")
+        return list(range(i, f + 1))
+    elif opcao == '3':
+        return PORTAS_COMUNS
+    else:
+        raise ValueError("Opção inválida")
+
+def main():
+    try:
+        print("=== Scapy Port Scanner Pro ===")
+        # Aceita qualquer formato agora (URL, IP, Domínio)
+        raw_target = input("Alvo (URL, IP ou Hostname): ").strip()
+        
+        if not raw_target:
+            print("[!] O alvo não pode ser vazio.")
+            sys.exit(1)
+
+        # Resolve e limpa o alvo
+        target_ip = resolver_alvo(raw_target)
+        
+        ports = obter_portas()
+
+        print(f"\nIniciando scans em {target_ip}...\n")
+        print(f"{'PORTA':<8} {'TIPO':<10} {'STATUS':<25}")
+        print("-" * 45)
+
+        for port in ports:
+            try:
+                # Armazena resultados para imprimir alinhado
+                res_syn = tcp_syn_scan(target_ip, port)
+                print(f"{port:<8} {'SYN':<10} {res_syn:<25}")
+                
+                res_udp = udp_scan(target_ip, port)
+                print(f"{port:<8} {'UDP':<10} {res_udp:<25}")
+                
+                res_ack = tcp_ack_scan(target_ip, port)
+                print(f"{port:<8} {'ACK':<10} {res_ack:<25}")
+                
+                res_xmas = tcp_xmas_scan(target_ip, port)
+                print(f"{port:<8} {'XMAS':<10} {res_xmas:<25}")
+                
+                print("-" * 45)
+            except KeyboardInterrupt:
+                raise KeyboardInterrupt # Joga para o catch principal
+
+    except KeyboardInterrupt:
+        print("\n\n[!] Interrompido pelo usuário. Saindo...")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n[!] Erro: {e}")
+
+if __name__ == "__main__":
+    main()
