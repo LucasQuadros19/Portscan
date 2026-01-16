@@ -1,0 +1,42 @@
+21 ftp
+22 ssh
+23 telnet
+25 smtp
+53 dns
+80 http
+110 pop3
+111 rpcbind
+135 ms-rpc
+139 netbios-ssn
+143 imap
+443 https
+445 microsoft-ds
+993 imaps
+995 pop3s
+1723 pptp
+3306 mysql
+3389 rdp
+5900 vnc
+8080 http-proxy
+
+
+sudo python3 portscan.py 127.0.0.1 -p 22,80 -sS -sV
+
+
+
+
+sudo python3 portscan.py 127.0.0.1 -p 22 -sF --view text
+
+
+
+sudo python3 portscan.py 127.0.0.1 -p 80 -sS --pad --view text
+
+
+
+sudo python3 portscan.py 127.0.0.1 -p 80 -sS --http --view text
+
+
+sudo python3 portscan.py 127.0.0.1 -p 80 -sS -f
+
+
+
